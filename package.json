@@ -1,0 +1,47 @@
+{
+    "name": "file-usage-analyzer",
+    "version": "1.0.9",
+    "description": "A universal file usage analyzer for JS/TS/React/Vue projects that analyzes file usage and generates markdown reports.",
+    "main": "dist/bin/index.js",
+    "types": "dist/bin/index.d.ts",
+    "bin": {
+      "file-usage-analyzer": "bin/index.js"
+    },
+    "scripts": {
+      "build": "tsc",
+      "start": "node bin/index.js",
+      "test": "echo \"No tests specified\""
+    },
+    "repository": {
+      "type": "git",
+      "url": "https://github.com/yeo11200/file-usage-analyzer.git"
+    },
+    "keywords": [
+      "file",
+      "usage",
+      "analyzer",
+      "import",
+      "react",
+      "vue",
+      "typescript",
+      "javascript"
+    ],
+    "author": "yeo11200",
+    "license": "MIT",
+    "dependencies": {
+      "glob": "^7.2.0"
+    },
+    "devDependencies": {
+      "@types/glob": "^8.1.0",
+      "@types/node": "^22.13.13",
+      "typescript": "^4.0.0"
+    },
+    "files": [
+      "lib",
+      "bin",
+      "dist"
+    ],
+    "engines": {
+      "node": ">=12.0.0"
+    }
+  }
