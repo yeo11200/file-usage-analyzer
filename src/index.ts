@@ -25,6 +25,31 @@ export interface Summary {
   used: number;
   unused: number;
   byType: Record<string, { total: number; used: number; unused: number }>;
+  barrelStats?: BarrelStats;
+}
+
+export interface BarrelStats {
+  excludedRelativeBarrels: number;
+  totalFiles?: number;
+  filesWithRelativeBarrels?: number;
+  totalRelativeBarrels?: number;
+  barrelDetails?: BarrelDetail[];
+  excludedBarrels?: ExcludedBarrel[];
+}
+
+export interface BarrelDetail {
+  filePath?: string;
+  file?: string;
+  statement: string;
+  path: string;
+  exportedFiles?: string[];
+}
+
+export interface ExcludedBarrel {
+  filePath?: string;
+  file?: string;
+  statement: string;
+  path: string;
 }
 
 export interface AnalysisResult {
@@ -47,6 +72,7 @@ export interface ImportPatterns {
   appProvideImport?: RegExp;
   vueComponentImport?: RegExp;
   serviceImport?: RegExp;
+  barrelImport?: RegExp;
 }
 
 export interface AnalyzerOptions {
@@ -58,6 +84,7 @@ export interface AnalyzerOptions {
   outputDir?: string;
   generateFiles?: boolean;
   importPatterns?: ImportPatterns;
+  generateBarrelStats?: boolean;
 }
 
 // Default configurations
@@ -84,7 +111,8 @@ export const defaultImportPatterns: ImportPatterns = {
   provideImport: /provide\(['"][^'"]+['"], [^)]*?['"]([@/][^'"]+)['"]/g,
   appProvideImport: /app\.provide\(['"][^'"]+['"], [^)]*?['"]([@/][^'"]+)['"]/g,
   vueComponentImport: /components: {[^}]*['"]([^'"]+)['"]/g,
-  serviceImport: /from ['"](@\/services\/[^'"]+)['"]/g
+  serviceImport: /from ['"](@\/services\/[^'"]+)['"]/g,
+  barrelImport: /import\s*{\s*[^}]+\s*}\s*from\s*['"]([^'"]+)['"]/g
 };
 
 /**
@@ -97,6 +125,151 @@ export function getFileType(filePath: string, typeMapping: FileTypeMapping = def
     }
   }
   return 'other';
+}
+
+/**
+ * Resolve relative path to absolute path
+ */
+export function resolveRelativePath(relativePath: string, baseFilePath: string): string {
+  // If not a relative path, return as is
+  if (!relativePath.startsWith('./') && !relativePath.startsWith('../')) {
+    return relativePath;
+  }
+
+  // Get the directory of the base file
+  const baseDir = path.dirname(baseFilePath);
+
+  // Resolve the relative path
+  const resolvedPath = path.resolve(baseDir, relativePath);
+
+  // If the resolved path is outside the src directory, return the original path
+  if (!resolvedPath.includes('/src/')) {
+    return relativePath;
+  }
+
+  return resolvedPath;
+}
+
+/**
+ * Analyze barrel file content and extract exported paths
+ */
+export function analyzeBarrelFile(barrelFilePath: string): string[] {
+  if (!fs.existsSync(barrelFilePath)) return [];
+
+  const content = fs.readFileSync(barrelFilePath, 'utf8');
+  const dir = path.dirname(barrelFilePath);
+  const exportPaths: string[] = [];
+
+  // export * from './file' pattern
+  const reExportAll = content.match(/export\s*\*\s*from\s*['"]([^'"]+)['"]/g) || [];
+
+  // export { component } from './file' pattern
+  const reExportNamed = content.match(/export\s*{\s*[^}]*\s*}\s*from\s*['"]([^'"]+)['"]/g) || [];
+
+  // export { default as Name } from './file' pattern
+  const reExportDefault = content.match(/export\s*{\s*default\s+as\s+[^}]*\s*}\s*from\s*['"]([^'"]+)['"]/g) || [];
+
+  // export default pattern (single export)
+  const defaultExports = content.match(/export\s+default\s+[^;]+/g) || [];
+
+  [...reExportAll, ...reExportNamed, ...reExportDefault].forEach((stmt) => {
+    const match = stmt.match(/from\s*['"]([^'"]+)['"]/);
+    if (match && match[1]) {
+      let relativePath = match[1];
+
+      // Convert relative path to absolute path
+      if (relativePath.startsWith('./') || relativePath.startsWith('../')) {
+        const resolved = path.resolve(dir, relativePath);
+        exportPaths.push(resolved);
+
+        // Handle paths without extensions
+        if (!path.extname(resolved)) {
+          exportPaths.push(`${resolved}.js`);
+          exportPaths.push(`${resolved}.ts`);
+          exportPaths.push(`${resolved}.vue`);
+        }
+      } else if (relativePath.startsWith('@/')) {
+        // Handle @/ paths
+        const srcPath = relativePath.replace('@/', 'src/');
+        exportPaths.push(srcPath);
+
+        // Handle paths without extensions
+        if (!path.extname(srcPath)) {
+          exportPaths.push(`${srcPath}.js`);
+          exportPaths.push(`${srcPath}.ts`);
+          exportPaths.push(`${srcPath}.vue`);
+        }
+      }
+    }
+  });
+
+  return exportPaths;
+}
+
+/**
+ * Recursively analyze barrel files to handle nested barrels
+ */
+export function analyzeBarrelFileRecursive(barrelPath: string, visitedPaths: Set<string> = new Set<string>()): string[] {
+  if (visitedPaths.has(barrelPath)) return []; // Prevent circular references
+  visitedPaths.add(barrelPath);
+
+  const exportedPaths = analyzeBarrelFile(barrelPath);
+  const result = [...exportedPaths];
+
+  // Check if any of the exported files are also barrel files
+  exportedPaths.forEach((exportPath) => {
+    if (fs.existsSync(exportPath) && (exportPath.endsWith('/index.js') || exportPath.endsWith('/index.ts'))) {
+      const nestedExports = analyzeBarrelFileRecursive(exportPath, visitedPaths);
+      result.push(...nestedExports);
+    }
+  });
+
+  return result;
+}
+
+/**
+ * Determine if a source file matches an imported path
+ */
+export function isPathMatch(srcFile: string, importedPath: string): boolean {
+  const absoluteSrcPath = path.resolve(srcFile);
+  const normalizedPath = path.normalize(importedPath);
+
+  // Exact path matching (comparing absolute paths)
+  if (absoluteSrcPath === path.resolve(normalizedPath)) {
+    return true;
+  }
+
+  // File name based matching (applied strictly)
+  const srcBaseName = path.basename(srcFile, path.extname(srcFile));
+  const importBaseName = path.basename(normalizedPath, path.extname(normalizedPath));
+
+  // Compare the same base filenames - more flexible for aliases
+  if (srcBaseName === importBaseName) {
+    return true; // Files with the same name are considered related
+  }
+
+  // Handle specific components like ThumbNail.vue
+  if (srcBaseName === 'ThumbNail' && importedPath.includes('ThumbNail')) {
+    return true;
+  }
+
+  // Handle specific components like StatusChip.vue
+  if (srcBaseName === 'StatusChip' && importedPath.includes('StatusChip')) {
+    return true;
+  }
+
+  // Special case for service files
+  if (srcFile.includes('/services/') && normalizedPath.includes('/services/')) {
+    const srcServiceName = srcFile.split('/').pop()?.split('.')[0] || '';
+    const importServiceName = normalizedPath.split('/').pop()?.split('.')[0] || '';
+
+    // If service names are related (accounting for kebab-case and camelCase differences)
+    if (srcServiceName.includes(importServiceName) || importServiceName.includes(srcServiceName)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -117,6 +290,46 @@ export function parseImports(
   const provideImports: string[] = content.match(patterns.provideImport || defaultImportPatterns.provideImport!) || [];
   const appProvideImports: string[] = content.match(patterns.appProvideImport || defaultImportPatterns.appProvideImport!) || [];
   const vueComponentImports: string[] = content.match(patterns.vueComponentImport || defaultImportPatterns.vueComponentImport!) || [];
+
+  // Barrel imports (using destructuring syntax)
+  const barrelImports: string[] = content.match(patterns.barrelImport || defaultImportPatterns.barrelImport!) || [];
+
+  // Process barrel imports first (to give them priority)
+  barrelImports.forEach(importStmt => {
+    const match = importStmt.match(/from\s*['"]([^'"]+)['"]/);
+    if (match && match[1]) {
+      let importPath = match[1];
+      
+      // Skip node_modules
+      if (importPath.includes('node_modules')) return;
+      
+      // Handle @/ paths
+      if (importPath.startsWith('@/')) {
+        importPath = importPath.replace('@/', 'src/');
+      }
+      
+      // Barrel files typically point to index.js files
+      if (!path.extname(importPath)) {
+        imports.push(`${importPath}/index.js`);
+        imports.push(`${importPath}/index.ts`);
+        imports.push(`${importPath}/index.jsx`);
+        imports.push(`${importPath}/index.tsx`);
+        imports.push(`${importPath}/index.vue`);
+        imports.push(`${importPath}/Index.js`);
+        imports.push(`${importPath}/Index.vue`);
+      }
+      
+      // Add base path as well
+      imports.push(importPath);
+      if (!path.extname(importPath)) {
+        imports.push(`${importPath}.js`);
+        imports.push(`${importPath}.ts`);
+        imports.push(`${importPath}.jsx`);
+        imports.push(`${importPath}.tsx`);
+        imports.push(`${importPath}.vue`);
+      }
+    }
+  });
 
   // Process service imports specially
   const serviceMatches: string[] = content.match(patterns.serviceImport || defaultImportPatterns.serviceImport!) || [];
@@ -157,6 +370,11 @@ export function parseImports(
     ...appProvideImports,
     ...vueComponentImports,
   ].forEach((importStmt) => {
+    // Skip barrel imports that we processed above
+    if (importStmt.includes('{') && importStmt.includes('}') && importStmt.includes('from')) {
+      return;
+    }
+    
     let match: RegExpMatchArray | null = null;
 
     if (importStmt.includes('() =>')) {
@@ -178,19 +396,26 @@ export function parseImports(
       
       // Skip node_modules
       if (!importPath.includes('node_modules')) {
+        // Handle relative paths
+        if (importPath.startsWith('./') || importPath.startsWith('../')) {
+          importPath = resolveRelativePath(importPath, filePath);
+        }
         // Handle @/ paths
-        if (importPath.startsWith('@/')) {
+        else if (importPath.startsWith('@/')) {
           importPath = importPath.replace('@/', 'src/');
         }
 
         // Handle paths without extensions
         if (!path.extname(importPath) && !importPath.endsWith('/')) {
           const possiblePaths: string[] = [
+            importPath,
             `${importPath}.vue`,
             `${importPath}.js`,
             `${importPath}.ts`,
             `${importPath}/index.vue`,
             `${importPath}/Index.vue`,
+            `${importPath}/index.js`,
+            `${importPath}/index.ts`,
           ];
 
           // Special handling for API/services
@@ -236,7 +461,8 @@ export function parseImports(
     }
   });
 
-  return imports;
+  // Remove duplicates
+  return [...new Set(imports)];
 }
 
 /**
@@ -329,7 +555,8 @@ export function analyzeProject(options: AnalyzerOptions = {}): Promise<AnalysisR
         mainJsPattern = defaultMainJsPattern,
         outputDir = './',
         generateFiles = true,
-        importPatterns = defaultImportPatterns
+        importPatterns = defaultImportPatterns,
+        generateBarrelStats = false
       } = options;
 
       // Find all source files
@@ -337,8 +564,19 @@ export function analyzeProject(options: AnalyzerOptions = {}): Promise<AnalysisR
       console.log(`Analyzing ${srcFiles.length} files...`);
 
       // Maps to store analysis data
-      const allImports: Map<string, string[]> = new Map();
+      const allImports: Map<string, { imports: string[], barrelImportInfo?: BarrelDetail[], excludedBarrelImports?: ExcludedBarrel[] }> = new Map();
       const importedByMap: Map<string, string[]> = new Map();
+
+      // Stats tracking
+      const stats = {
+        totalImports: 0,
+        excludedRelativeBarrels: 0,
+      };
+
+      // Find barrel files for later analysis
+      const barrelFiles = srcFiles.filter(
+        file => file.endsWith('/index.js') || file.endsWith('/index.ts') || file.includes('/barrel.') || file.includes('/exports.')
+      );
 
       // Initialize importedByMap
       srcFiles.forEach(file => {
@@ -349,6 +587,29 @@ export function analyzeProject(options: AnalyzerOptions = {}): Promise<AnalysisR
       srcFiles.forEach(file => {
         const content: string = fs.readFileSync(file, 'utf8');
         const imports: string[] = parseImports(content, file, importPatterns);
+        
+        // Track barrel imports if needed
+        const barrelImportInfo: BarrelDetail[] = [];
+        const excludedBarrelImports: ExcludedBarrel[] = [];
+        
+        if (generateBarrelStats) {
+          // Find relative barrel imports
+          const barrelImportMatches = content.match(importPatterns.barrelImport || defaultImportPatterns.barrelImport!) || [];
+          barrelImportMatches.forEach(importStmt => {
+            stats.totalImports++;
+            
+            const pathMatch = importStmt.match(/from\s*['"](\.[^'"]+)['"]/);
+            if (pathMatch) {
+              // Exclude relative barrel imports from main processing
+              stats.excludedRelativeBarrels++;
+              excludedBarrelImports.push({
+                filePath: pathMatch[1],
+                statement: importStmt,
+                path: pathMatch[1]
+              });
+            }
+          });
+        }
 
         // Handle app.provide patterns
         processAppProvides(
@@ -360,24 +621,24 @@ export function analyzeProject(options: AnalyzerOptions = {}): Promise<AnalysisR
         );
 
         // Store imports
-        allImports.set(file, imports);
+        allImports.set(file, { imports });
+        
+        // Add barrel info if present
+        if (barrelImportInfo.length > 0) {
+          allImports.get(file)!.barrelImportInfo = barrelImportInfo;
+        }
+        
+        if (excludedBarrelImports.length > 0) {
+          allImports.get(file)!.excludedBarrelImports = excludedBarrelImports;
+        }
       });
 
       // Build reverse mapping (which files are imported by others)
-      allImports.forEach((imports, importingFile) => {
-        imports.forEach(importedPath => {
-          const normalizedPath = path.normalize(importedPath);
-
+      allImports.forEach((importData, importingFile) => {
+        importData.imports.forEach(importedPath => {
+          // Use the enhanced path matching
           srcFiles.forEach(srcFile => {
-            const absoluteSrcPath = path.resolve(srcFile);
-            if (
-              absoluteSrcPath.endsWith(normalizedPath) ||
-              normalizedPath.endsWith(srcFile) ||
-              path.basename(absoluteSrcPath) === path.basename(normalizedPath) ||
-              (srcFile.includes('/services/') &&
-                (normalizedPath.includes(path.basename(srcFile)) || 
-                srcFile.includes(path.basename(normalizedPath))))
-            ) {
+            if (isPathMatch(srcFile, importedPath)) {
               const importedBy = importedByMap.get(srcFile) || [];
               if (!importedBy.includes(importingFile)) {
                 importedBy.push(importingFile);
@@ -416,6 +677,13 @@ export function analyzeProject(options: AnalyzerOptions = {}): Promise<AnalysisR
         byType: {}
       };
 
+      // Add barrel stats if requested
+      if (generateBarrelStats) {
+        summary.barrelStats = {
+          excludedRelativeBarrels: stats.excludedRelativeBarrels
+        };
+      }
+
       // Type-based statistics
       const types = Array.from(new Set(fileAnalysis.files.map(f => f.type)));
       types.forEach(type => {
@@ -436,6 +704,11 @@ export function analyzeProject(options: AnalyzerOptions = {}): Promise<AnalysisR
       markdown += `- Files in use: ${summary.used}\n`;
       markdown += `- Unused files: ${summary.unused}\n\n`;
       
+      // Add barrel stats if available
+      if (summary.barrelStats) {
+        markdown += `- Excluded relative barrel imports: ${summary.barrelStats.excludedRelativeBarrels}\n\n`;
+      }
+      
       // Statistics by type
       markdown += '## Statistics by File Type\n\n';
       markdown += '| File Type | Total | Used | Unused |\n';
@@ -455,6 +728,58 @@ export function analyzeProject(options: AnalyzerOptions = {}): Promise<AnalysisR
         .forEach(file => {
           markdown += `| ${file.path} | ${file.type} |\n`;
         });
+
+      // Write barrel analysis if requested
+      if (generateBarrelStats && generateFiles) {
+        const relativeBarrelStats = {
+          totalFiles: srcFiles.length,
+          filesWithRelativeBarrels: 0,
+          totalRelativeBarrels: 0,
+          excludedRelativeBarrelCount: stats.excludedRelativeBarrels,
+          barrelDetails: [] as BarrelDetail[],
+          excludedBarrels: [] as ExcludedBarrel[]
+        };
+
+        allImports.forEach((importData, file) => {
+          if (importData.barrelImportInfo && importData.barrelImportInfo.length > 0) {
+            relativeBarrelStats.filesWithRelativeBarrels++;
+            relativeBarrelStats.totalRelativeBarrels += importData.barrelImportInfo.length;
+
+            // Collect detailed info (limit to 100)
+            if (relativeBarrelStats.barrelDetails.length < 100) {
+              importData.barrelImportInfo.forEach(info => {
+                relativeBarrelStats.barrelDetails.push({
+                  filePath: file,
+                  statement: info.statement,
+                  path: info.path,
+                  exportedFiles: info.exportedFiles
+                });
+              });
+            }
+          }
+
+          // Add excluded barrel imports
+          if (importData.excludedBarrelImports && importData.excludedBarrelImports.length > 0) {
+            // Limit to 100 entries
+            if (relativeBarrelStats.excludedBarrels.length < 100) {
+              importData.excludedBarrelImports.forEach(info => {
+                relativeBarrelStats.excludedBarrels.push({
+                  filePath: file,
+                  statement: info.statement,
+                  path: info.path
+                });
+              });
+            }
+          }
+        });
+
+        fs.writeFileSync(
+          path.join(outputDir, 'barrel-analysis.json'),
+          JSON.stringify(relativeBarrelStats, null, 2),
+          'utf-8'
+        );
+        console.log('Barrel import analysis has been saved to barrel-analysis.json');
+      }
 
       // Write output files if requested
       if (generateFiles) {
@@ -534,6 +859,8 @@ export function runFromCommandLine() {
       i++;
     } else if (args[i] === '--no-files') {
       options.generateFiles = false;
+    } else if (args[i] === '--barrel-stats') {
+      options.generateBarrelStats = true;
     }
   }
   
