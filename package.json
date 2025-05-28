@@ -1,0 +1,45 @@
+{
+    "name": "file-usage-analyzer",
+    "version": "1.1.6",
+    "description": "Analyze file usage in JavaScript/TypeScript projects to identify unused files",
+    "main": "dist/src/index.js",
+    "types": "dist/src/index.d.ts",
+    "scripts": {
+      "build": "tsc",
+      "prepublishOnly": "npm run build",
+      "start": "node dist/src/index.js",
+      "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "repository": {
+      "type": "git",
+      "url": "https://github.com/yeo11200/file-usage-analyzer.git"
+    },
+    "keywords": [
+      "file",
+      "usage",
+      "analysis",
+      "dependency",
+      "imports",
+      "unused",
+      "dead-code"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+      "glob": "^7.2.0"
+    },
+    "devDependencies": {
+      "@types/glob": "^7.2.0",
+      "@types/node": "^16.11.12",
+      "typescript": "^4.5.4"
+    },
+    "files": [
+      "dist",
+      "bin",
+      "README.md",
+      "LICENSE"
+    ],
+    "engines": {
+      "node": ">=12.0.0"
+    }
+  }
